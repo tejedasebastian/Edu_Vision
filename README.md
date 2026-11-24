@@ -196,6 +196,7 @@ Implementado:
 
 Pendiente / recomendado antes de producción:
 
+- [ ] Rotar o eliminar las cuentas del seed: sus contraseñas antiguas siguen en el historial público de git; no deben reutilizarse.
 - [ ] Tests de integración con MySQL real (los actuales usan mocks y rutas sin BD).
 - [ ] Rate limiting en `login`, `register` y subidas.
 - [ ] Refresh tokens o revocación de sesiones (hoy el JWT dura `JWT_EXPIRES_IN`).
