@@ -184,7 +184,7 @@ Implementado:
 - [x] JWT firmado en el servidor (`HS256`) para todos los `/api/*` salvo `login`, `register` y `health`.
 - [x] Autorización por rol (`alumno`, `docente`, `admin`) y por propiedad del recurso.
 - [x] `docente_id`, `alumno_id`, `usuario_id` y `admin_id` tomados del token, no del body.
-- [x] Contraseñas con bcrypt (12 rondas) en registro y login; sin fallback a texto plano.
+- [x] Contraseñas con bcrypt y salt en registro y login; sin fallback a texto plano.
 - [x] Seed SQL con hashes bcrypt.
 - [x] CORS con allowlist `CORS_ORIGINS`; nunca `*` con credenciales.
 - [x] Estáticos limitados a `public/` y `/uploads`; `server.js`, `eduVision.sql` y `.env` no se sirven.
