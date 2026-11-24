@@ -3,25 +3,58 @@ const mysql = require('mysql2/promise');
 const path = require('path');
 const multer = require('multer');
 const fs = require('fs');
-const bcrypt = require('bcrypt');
+const crypto = require('crypto');
+const bcrypt = require('bcryptjs');
 require('dotenv').config();
+const { authenticate, requireRole, signToken } = require('./lib/auth');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-app.use(express.static(path.join(__dirname, '')));
+// En producción no se permite arrancar sin un secreto JWT explícito.
+if (process.env.NODE_ENV === 'production' && !process.env.JWT_SECRET) {
+  console.error('❌ FATAL: JWT_SECRET es obligatorio en producción.');
+  process.exit(1);
+}
 
-// CORS headers
+// Middleware
+app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ extended: true, limit: '1mb' }));
+
+// Cabeceras de seguridad básicas
 app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(200);
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  next();
+});
+
+// CORS: allowlist explícita desde CORS_ORIGINS (separada por comas).
+// Nunca se usa "*" ni se habilitan credenciales para orígenes comodín.
+const corsOrigins = (process.env.CORS_ORIGINS || '')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+
+  res.setHeader('Vary', 'Origin');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Max-Age', '600');
+
+  if (origin && corsOrigins.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+  } else if (origin && req.method === 'OPTIONS' && corsOrigins.length > 0) {
+    return res.status(403).json({ error: 'Origen no permitido' });
   }
+
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+
   next();
 });
 
@@ -73,6 +106,19 @@ async function query(sql, params = []) {
 }
 
 // ========================================
+// ESTÁTICOS
+// ========================================
+
+// Solo se sirve el frontend compilado/servido desde public/.
+// server.js, eduVision.sql, .env y demás archivos de la raíz NO son accesibles.
+const publicDir = path.join(__dirname, 'public');
+app.use(express.static(publicDir, {
+  index: 'index.html',
+  dotfiles: 'ignore',
+  fallthrough: true
+}));
+
+// ========================================
 // CONFIGURACIÓN DE MULTER (UPLOAD DE ARCHIVOS)
 // ========================================
 
@@ -82,46 +128,140 @@ if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
 
+// Allowlist estricta de MIME + extensión. Sin zip/rar, sin SVG, sin HTML.
+const ALLOWED_UPLOAD_TYPES = new Map([
+  ['image/jpeg', '.jpg'],
+  ['image/png', '.png'],
+  ['image/gif', '.gif'],
+  ['image/webp', '.webp'],
+  ['application/pdf', '.pdf']
+]);
+const ALLOWED_UPLOAD_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.pdf']);
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024; // 10 MB
+
 // Configuración de almacenamiento
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
     cb(null, uploadsDir);
   },
   filename: function (req, file, cb) {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    const ext = path.extname(file.originalname);
+    const ext = ALLOWED_UPLOAD_TYPES.get(file.mimetype) || '.bin';
+    const uniqueSuffix = Date.now() + '-' + crypto.randomBytes(8).toString('hex');
     cb(null, 'file-' + uniqueSuffix + ext);
   }
 });
 
 // Filtro de tipos de archivo
 const fileFilter = function (req, file, cb) {
-  const allowedTypes = /jpeg|jpg|png|gif|pdf|mp4|mp3|wav|doc|docx|ppt|pptx|xls|xlsx|zip|rar/;
-  const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
-  const mimetype = allowedTypes.test(file.mimetype);
-  
-  if (extname && mimetype) {
+  const ext = path.extname(file.originalname || '').toLowerCase();
+  const expectedExt = ALLOWED_UPLOAD_TYPES.get(file.mimetype);
+  const extensionOk = ALLOWED_UPLOAD_EXTENSIONS.has(ext)
+    && (ext === expectedExt || (expectedExt === '.jpg' && ext === '.jpeg'));
+
+  if (expectedExt && extensionOk) {
     return cb(null, true);
-  } else {
-    cb(new Error('Tipo de archivo no permitido. Formatos aceptados: imágenes, videos, audios, documentos'));
   }
+
+  const error = new Error('Tipo de archivo no permitido. Solo se aceptan imágenes (JPG, PNG, GIF, WebP) y PDF.');
+  error.status = 400;
+  return cb(error);
 };
 
 // Configurar multer
-const upload = multer({ 
+const upload = multer({
   storage: storage,
-  limits: { 
-    fileSize: 200 * 1024 * 1024 // 200MB
+  limits: {
+    fileSize: MAX_UPLOAD_BYTES,
+    files: 10
   },
   fileFilter: fileFilter
 });
 
-// Servir archivos estáticos desde uploads
-app.use('/uploads', express.static(uploadsDir));
+// Servir archivos estáticos desde uploads con cabeceras seguras.
+// Los nombres son generados por el servidor (nunca el nombre original).
+app.use('/uploads', (req, res, next) => {
+  const safeName = path.basename(req.path).replace(/[^a-zA-Z0-9._-]/g, '_');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Content-Disposition', `inline; filename="${safeName}"`);
+  next();
+}, express.static(uploadsDir, {
+  index: false,
+  dotfiles: 'ignore',
+  fallthrough: false
+}));
+
+// ========================================
+// HELPERS DE AUTORIZACIÓN
+// ========================================
+
+function isAdmin(req) {
+  return req.user && req.user.rol === 'admin';
+}
+
+async function docenteOwnsCurso(user, cursoId) {
+  if (!user || user.rol !== 'docente' || !user.id_docente) {
+    return false;
+  }
+
+  const rows = await query(
+    'SELECT id_curso FROM curso WHERE id_curso = ? AND docente_id = ?',
+    [cursoId, user.id_docente]
+  );
+
+  return rows.length > 0;
+}
+
+async function canManageCurso(req, cursoId) {
+  if (isAdmin(req)) return true;
+  return docenteOwnsCurso(req.user, cursoId);
+}
+
+async function getContenidoCursoId(contenidoId) {
+  const rows = await query(
+    'SELECT curso_id FROM contenido WHERE id_contenido = ?',
+    [contenidoId]
+  );
+  return rows.length ? rows[0].curso_id : null;
+}
+
+async function getCuestionarioCursoId(cuestionarioId) {
+  const rows = await query(
+    'SELECT curso_id FROM cuestionario WHERE id_cuestionario = ?',
+    [cuestionarioId]
+  );
+  return rows.length ? rows[0].curso_id : null;
+}
+
+async function getPreguntaCursoId(preguntaId) {
+  const rows = await query(
+    `SELECT q.curso_id
+     FROM pregunta p
+     JOIN cuestionario q ON p.cuestionario_id = q.id_cuestionario
+     WHERE p.id_pregunta = ?`,
+    [preguntaId]
+  );
+  return rows.length ? rows[0].curso_id : null;
+}
+
+async function canManageRecurso(req, recursoId) {
+  if (isAdmin(req)) return true;
+  if (!req.user || req.user.rol !== 'docente') return false;
+
+  const rows = await query(
+    'SELECT id_recurso FROM recurso WHERE id_recurso = ? AND usuario_id = ?',
+    [recursoId, req.user.id_usuario]
+  );
+  return rows.length > 0;
+}
 
 // ========================================
 // ENDPOINTS DE AUTENTICACIÓN
 // ========================================
+
+// GET /api/health - Liveness público (sin datos de conexión)
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok' });
+});
 
 // POST /api/login - Inicio de sesión
 app.post('/api/login', async (req, res) => {
@@ -145,34 +285,31 @@ app.post('/api/login', async (req, res) => {
     );
 
     if (usuarios.length === 0) {
-      return res.status(401).json({ error: 'Credenciales inválidas o usuario inactivo' });
+      return res.status(401).json({ error: 'Credenciales inválidas' });
     }
 
     const user = usuarios[0];
-    
-    // Verificar contraseña (puede estar hasheada o en texto plano para compatibilidad)
+
+    // Solo se aceptan contraseñas hasheadas con bcrypt. No hay fallback a texto plano.
     let passwordMatch = false;
-    
-    // Intentar comparar con bcrypt primero
-    if (user.contraseña && user.contraseña.startsWith('$2')) {
-      // Contraseña hasheada
-      passwordMatch = await bcrypt.compare(contraseña, user.contraseña);
-    } else {
-      // Contraseña en texto plano (para compatibilidad con datos existentes)
-      passwordMatch = user.contraseña === contraseña;
+    try {
+      passwordMatch = await bcrypt.compare(contraseña, user.contraseña || '');
+    } catch (error) {
+      passwordMatch = false;
     }
 
     if (!passwordMatch) {
       return res.status(401).json({ error: 'Credenciales inválidas' });
     }
 
+    const token = signToken(user);
+
     // No enviar contraseña al cliente
     delete user.contraseña;
-    res.json({ success: true, user });
+    res.json({ success: true, token, user });
   } catch (error) {
     console.error('❌ Error en login:', error.message);
-    console.error('Stack:', error.stack);
-    res.status(500).json({ error: error.message || 'Error en el servidor' });
+    res.status(500).json({ error: 'Error en el servidor' });
   }
 });
 
@@ -215,10 +352,13 @@ app.post('/api/register', async (req, res) => {
       // Iniciar transacción
       await connection.beginTransaction();
 
+      // Hash de contraseña con bcrypt (salt incluido)
+      const passwordHash = await bcrypt.hash(contraseña, 12);
+
       // Insertar usuario
       const [resultUsuario] = await connection.execute(
         'INSERT INTO usuario (nombre, apellido, correo, contraseña, rol, estado) VALUES (?, ?, ?, ?, ?, ?)',
-        [nombre, apellido, correo, contraseña, rol, 'activo']
+        [nombre, apellido, correo, passwordHash, rol, 'activo']
       );
 
       const usuarioId = resultUsuario.insertId;
@@ -255,9 +395,17 @@ app.post('/api/register', async (req, res) => {
       connection.release();
     }
   } catch (error) {
-    console.error('Error en registro:', error);
-    res.status(500).json({ error: 'Error al registrar usuario: ' + error.message });
+    console.error('Error en registro:', error.message);
+    res.status(500).json({ error: 'Error al registrar usuario' });
   }
+});
+
+// A partir de aquí, todos los endpoints /api requieren JWT válido.
+app.use('/api', authenticate);
+
+// GET /api/auth/me - Datos del usuario autenticado según el token
+app.get('/api/auth/me', (req, res) => {
+  res.json({ user: req.user });
 });
 
 // ========================================
@@ -294,12 +442,12 @@ app.get('/api/cursos', async (req, res) => {
       params.push(grado);
     }
     
-    if (estado) {
+    if (estado && isAdmin(req)) {
       sql += ' AND c.estado = ?';
       params.push(estado);
     } else {
-      // Por defecto, cursos aprobados o publicados
-      sql += ' AND (c.estado = "aprobado" OR c.estado = "publicado")';
+      // Alumnos y docentes solo ven cursos publicados/aprobados en el catálogo.
+      sql += " AND (c.estado = 'aprobado' OR c.estado = 'publicado')";
     }
     
     sql += ' ORDER BY c.fecha_creacion DESC';
@@ -358,11 +506,7 @@ app.get('/api/categorias', async (req, res) => {
       errno: error.errno,
       sqlState: error.sqlState
     });
-    res.status(500).json({ 
-      error: 'Error al obtener categorías',
-      details: error.message,
-      code: error.code
-    });
+    res.status(500).json({ error: 'Error al obtener categorías' });
   }
 });
 
@@ -429,22 +573,31 @@ app.get('/api/cursos/:id/recursos', async (req, res) => {
 });
 
 // POST /api/recursos - Agregar recurso a un curso
-app.post('/api/recursos', async (req, res) => {
+app.post('/api/recursos', requireRole('docente', 'admin'), async (req, res) => {
   try {
-    const { curso_id, tipo_id, titulo, url, descripcion, usuario_id } = req.body;
-    
-    if (!curso_id || !tipo_id || !titulo || !usuario_id) {
+    const { curso_id, tipo_id, titulo, url, descripcion } = req.body;
+
+    if (!curso_id || !tipo_id || !titulo) {
       return res.status(400).json({ error: 'Datos incompletos' });
     }
-    
+
+    if (!(await canManageCurso(req, curso_id))) {
+      return res.status(403).json({ error: 'No puedes agregar recursos a este curso' });
+    }
+
+    // El autor se toma del token, nunca del cliente.
+    const usuario_id = req.user.id_usuario;
+    // Un docente no puede autoaprobar su recurso.
+    const estado = isAdmin(req) ? (req.body.estado || 'pendiente') : 'pendiente';
+
     const result = await query(
-      'INSERT INTO recurso (curso_id, tipo_id, titulo, url, descripcion, usuario_id) VALUES (?, ?, ?, ?, ?, ?)',
-      [curso_id, tipo_id, titulo, url, descripcion, usuario_id]
+      'INSERT INTO recurso (curso_id, tipo_id, titulo, url, descripcion, usuario_id, estado) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [curso_id, tipo_id, titulo, url || null, descripcion || null, usuario_id, estado]
     );
-    
+
     res.json({ success: true, recursoId: result.insertId });
   } catch (error) {
-    console.error('Error al agregar recurso:', error);
+    console.error('Error al agregar recurso:', error.message);
     res.status(500).json({ error: 'Error al agregar recurso' });
   }
 });
@@ -454,10 +607,12 @@ app.post('/api/recursos', async (req, res) => {
 // ========================================
 
 // POST /api/inscribir - Inscribir alumno en curso
-app.post('/api/inscribir', async (req, res) => {
+app.post('/api/inscribir', requireRole('alumno'), async (req, res) => {
   try {
-    const { alumno_id, curso_id } = req.body;
-    
+    const { curso_id } = req.body;
+    // El alumno se toma del token; no se confía en el ID enviado por el cliente.
+    const alumno_id = req.user.id_alumno;
+
     if (!alumno_id || !curso_id) {
       return res.status(400).json({ error: 'Datos incompletos' });
     }
@@ -485,10 +640,14 @@ app.post('/api/inscribir', async (req, res) => {
 });
 
 // GET /api/alumnos/:id/cursos - Obtener cursos de un alumno
-app.get('/api/alumnos/:id/cursos', async (req, res) => {
+app.get('/api/alumnos/:id/cursos', requireRole('alumno', 'docente', 'admin'), async (req, res) => {
   try {
     const { id } = req.params;
-    
+
+    if (req.user.rol === 'alumno' && String(req.user.id_alumno) !== String(id)) {
+      return res.status(403).json({ error: 'Solo puedes consultar tus propios cursos' });
+    }
+
     const cursos = await query(
       `SELECT c.*, ac.fecha_inscripcion, ac.finalizado,
               cat.nombre AS categoria, g.nombre AS grado,
@@ -561,11 +720,13 @@ app.get('/api/cursos/:id/cuestionario', async (req, res) => {
 // ========================================
 
 // POST /api/encuestas - Enviar encuesta de satisfacción
-app.post('/api/encuestas', async (req, res) => {
+app.post('/api/encuestas', requireRole('alumno'), async (req, res) => {
   try {
-    const { curso_id, alumno_id, gusto_curso, mejora_curso, nivel_satisfaccion } = req.body;
-    
-    if (!curso_id || !nivel_satisfaccion) {
+    const { curso_id, gusto_curso, mejora_curso, nivel_satisfaccion } = req.body;
+    // El alumno se toma del token; no se confía en el ID enviado por el cliente.
+    const alumno_id = req.user.id_alumno;
+
+    if (!curso_id || !nivel_satisfaccion || !alumno_id) {
       return res.status(400).json({ error: 'Datos incompletos' });
     }
     
@@ -615,10 +776,14 @@ app.get('/api/docentes/:id/cursos', async (req, res) => {
 });
 
 // GET /api/docentes/:id/estadisticas - Obtener estadísticas del docente
-app.get('/api/docentes/:id/estadisticas', async (req, res) => {
+app.get('/api/docentes/:id/estadisticas', requireRole('docente', 'admin'), async (req, res) => {
   try {
     const { id } = req.params;
-    
+
+    if (req.user.rol === 'docente' && String(req.user.id_docente) !== String(id)) {
+      return res.status(403).json({ error: 'Solo puedes consultar tus propias estadísticas' });
+    }
+
     const stats = await query(
       `SELECT 
         COUNT(DISTINCT c.id_curso) AS total_cursos,
@@ -643,21 +808,26 @@ app.get('/api/docentes/:id/estadisticas', async (req, res) => {
 // ========================================
 
 // POST /api/cursos - Crear nuevo curso
-app.post('/api/cursos', async (req, res) => {
+app.post('/api/cursos', requireRole('docente', 'admin'), async (req, res) => {
   try {
-    const { docente_id, id_categoria, id_grado, titulo, descripcion, id_cuestionario, estado } = req.body;
-    
+    const { id_categoria, id_grado, titulo, descripcion, id_cuestionario } = req.body;
+
+    // El docente se toma del token. Un admin puede indicar docente_id explícitamente.
+    const docente_id = req.user.rol === 'docente' ? req.user.id_docente : req.body.docente_id;
+    // Un docente no puede publicar/aprobar su propio curso.
+    const estado = req.user.rol === 'docente' ? 'pendiente' : (req.body.estado || 'pendiente');
+
     // Validaciones
     if (!titulo) {
       return res.status(400).json({ error: 'Título es requerido' });
     }
-    
+
     if (!docente_id) {
       return res.status(400).json({ error: 'Docente ID es requerido' });
     }
-    
+
     // Validar estado si se proporciona
-    if (estado && !['pendiente', 'aprobado', 'rechazado', 'publicado'].includes(estado)) {
+    if (!['pendiente', 'aprobado', 'rechazado', 'publicado'].includes(estado)) {
       return res.status(400).json({ error: 'Estado inválido' });
     }
     
@@ -683,16 +853,22 @@ app.post('/api/cursos', async (req, res) => {
     
   } catch (error) {
     console.error('Error al crear curso:', error);
-    res.status(500).json({ error: 'Error al crear el curso: ' + error.message });
+    res.status(500).json({ error: 'Error al crear el curso' });
   }
 });
 
 // PUT /api/cursos/:id - Actualizar curso
-app.put('/api/cursos/:id', async (req, res) => {
+app.put('/api/cursos/:id', requireRole('docente', 'admin'), async (req, res) => {
   try {
     const { id } = req.params;
-    const { titulo, descripcion, id_categoria, id_grado, id_cuestionario, estado } = req.body;
-    
+    const { titulo, descripcion, id_categoria, id_grado, id_cuestionario } = req.body;
+    // Un docente no puede cambiar el estado de aprobación de sus cursos.
+    const estado = req.user.rol === 'docente' ? null : req.body.estado;
+
+    if (!(await canManageCurso(req, id))) {
+      return res.status(403).json({ error: 'No puedes modificar este curso' });
+    }
+
     // Validaciones
     if (!titulo) {
       return res.status(400).json({ error: 'Título es requerido' });
@@ -726,14 +902,18 @@ app.put('/api/cursos/:id', async (req, res) => {
     
   } catch (error) {
     console.error('Error al actualizar curso:', error);
-    res.status(500).json({ error: 'Error al actualizar el curso: ' + error.message });
+    res.status(500).json({ error: 'Error al actualizar el curso' });
   }
 });
 
 // DELETE /api/cursos/:id - Eliminar curso
-app.delete('/api/cursos/:id', async (req, res) => {
+app.delete('/api/cursos/:id', requireRole('docente', 'admin'), async (req, res) => {
   try {
     const { id } = req.params;
+
+    if (!(await canManageCurso(req, id))) {
+      return res.status(403).json({ error: 'No puedes eliminar este curso' });
+    }
     
     // Verificar que el curso existe
     const curso = await query('SELECT id_curso FROM curso WHERE id_curso = ?', [id]);
@@ -782,14 +962,18 @@ app.delete('/api/cursos/:id', async (req, res) => {
     
   } catch (error) {
     console.error('Error al eliminar curso:', error);
-    res.status(500).json({ error: 'Error al eliminar el curso: ' + error.message });
+    res.status(500).json({ error: 'Error al eliminar el curso' });
   }
 });
 
 // GET /api/cursos/:id/estadisticas - Obtener estadísticas del curso
-app.get('/api/cursos/:id/estadisticas', async (req, res) => {
+app.get('/api/cursos/:id/estadisticas', requireRole('docente', 'admin'), async (req, res) => {
   try {
     const { id } = req.params;
+
+    if (!(await canManageCurso(req, id))) {
+      return res.status(403).json({ error: 'No puedes consultar las estadísticas de este curso' });
+    }
     
     // Verificar que el curso existe
     const curso = await query('SELECT id_curso FROM curso WHERE id_curso = ?', [id]);
@@ -869,7 +1053,7 @@ app.get('/api/cursos/:id/estadisticas', async (req, res) => {
   } catch (error) {
     console.error('Error al obtener estadísticas:', error);
     console.error('Stack trace:', error.stack);
-    res.status(500).json({ error: 'Error al obtener estadísticas', details: error.message });
+    res.status(500).json({ error: 'Error al obtener estadísticas' });
   }
 });
 
@@ -878,18 +1062,26 @@ app.get('/api/cursos/:id/estadisticas', async (req, res) => {
 // ========================================
 
 // POST /api/contenido - Agregar contenido a un curso
-app.post('/api/contenido', async (req, res) => {
+app.post('/api/contenido', requireRole('docente', 'admin'), async (req, res) => {
   try {
-    const { curso_id, seccion, texto, usuario_id, estado } = req.body;
-    
-    if (!curso_id || !usuario_id) {
-      return res.status(400).json({ error: 'Curso ID y Usuario ID son requeridos' });
+    const { curso_id, seccion, texto } = req.body;
+
+    if (!curso_id) {
+      return res.status(400).json({ error: 'Curso ID es requerido' });
     }
-    
+
+    if (!(await canManageCurso(req, curso_id))) {
+      return res.status(403).json({ error: 'No puedes agregar contenido a este curso' });
+    }
+
+    // Autor tomado del token; estado forzado a pendiente para docentes.
+    const usuario_id = req.user.id_usuario;
+    const estado = isAdmin(req) ? (req.body.estado || 'pendiente') : 'pendiente';
+
     const result = await query(
       `INSERT INTO contenido (curso_id, seccion, texto, usuario_id, estado, fecha_subida)
        VALUES (?, ?, ?, ?, ?, NOW())`,
-      [curso_id, seccion || null, texto || null, usuario_id, estado || 'pendiente']
+      [curso_id, seccion || null, texto || null, usuario_id, estado]
     );
     
     res.json({ 
@@ -900,14 +1092,23 @@ app.post('/api/contenido', async (req, res) => {
     
   } catch (error) {
     console.error('Error al agregar contenido:', error);
-    res.status(500).json({ error: 'Error al agregar el contenido: ' + error.message });
+    res.status(500).json({ error: 'Error al agregar el contenido' });
   }
 });
 
 // DELETE /api/contenido/:id - Eliminar contenido
-app.delete('/api/contenido/:id', async (req, res) => {
+app.delete('/api/contenido/:id', requireRole('docente', 'admin'), async (req, res) => {
   try {
     const { id } = req.params;
+
+    const cursoId = await getContenidoCursoId(id);
+    if (!cursoId) {
+      return res.status(404).json({ error: 'Contenido no encontrado' });
+    }
+
+    if (!(await canManageCurso(req, cursoId))) {
+      return res.status(403).json({ error: 'No puedes eliminar este contenido' });
+    }
     
     const result = await query('DELETE FROM contenido WHERE id_contenido = ?', [id]);
     
@@ -928,9 +1129,13 @@ app.delete('/api/contenido/:id', async (req, res) => {
 // ========================================
 
 // GET /api/cursos/:id/cuestionarios - Obtener cuestionarios de un curso
-app.get('/api/cursos/:id/cuestionarios', async (req, res) => {
+app.get('/api/cursos/:id/cuestionarios', requireRole('docente', 'admin'), async (req, res) => {
   try {
     const { id } = req.params;
+
+    if (!(await canManageCurso(req, id))) {
+      return res.status(403).json({ error: 'No puedes consultar los cuestionarios de este curso' });
+    }
     const cuestionarios = await query(
       'SELECT * FROM cuestionario WHERE curso_id = ?',
       [id]
@@ -943,12 +1148,16 @@ app.get('/api/cursos/:id/cuestionarios', async (req, res) => {
 });
 
 // POST /api/cuestionarios - Crear nuevo quiz
-app.post('/api/cuestionarios', async (req, res) => {
+app.post('/api/cuestionarios', requireRole('docente', 'admin'), async (req, res) => {
   try {
     const { curso_id, titulo, descripcion, estado } = req.body;
     
     if (!curso_id || !titulo) {
       return res.status(400).json({ error: 'Curso ID y título son requeridos' });
+    }
+
+    if (!(await canManageCurso(req, curso_id))) {
+      return res.status(403).json({ error: 'No puedes crear quizzes en este curso' });
     }
     
     const result = await query(
@@ -965,19 +1174,22 @@ app.post('/api/cuestionarios', async (req, res) => {
     
   } catch (error) {
     console.error('Error al crear quiz:', error);
-    res.status(500).json({ error: 'Error al crear el quiz: ' + error.message });
+    res.status(500).json({ error: 'Error al crear el quiz' });
   }
 });
 
 // DELETE /api/cuestionarios/:id - Eliminar cuestionario
-app.delete('/api/cuestionarios/:id', async (req, res) => {
+app.delete('/api/cuestionarios/:id', requireRole('docente', 'admin'), async (req, res) => {
   try {
     const { id } = req.params;
-    
-    // Verificar que el cuestionario existe
-    const cuestionario = await query('SELECT id_cuestionario FROM cuestionario WHERE id_cuestionario = ?', [id]);
-    if (cuestionario.length === 0) {
+
+    const cursoId = await getCuestionarioCursoId(id);
+    if (!cursoId) {
       return res.status(404).json({ error: 'Cuestionario no encontrado' });
+    }
+
+    if (!(await canManageCurso(req, cursoId))) {
+      return res.status(403).json({ error: 'No puedes eliminar este cuestionario' });
     }
     
     // Eliminar opciones primero
@@ -1002,14 +1214,23 @@ app.delete('/api/cuestionarios/:id', async (req, res) => {
     
   } catch (error) {
     console.error('Error al eliminar cuestionario:', error);
-    res.status(500).json({ error: 'Error al eliminar el cuestionario: ' + error.message });
+    res.status(500).json({ error: 'Error al eliminar el cuestionario' });
   }
 });
 
 // GET /api/cuestionarios/:id/preguntas - Obtener preguntas de un quiz
-app.get('/api/cuestionarios/:id/preguntas', async (req, res) => {
+app.get('/api/cuestionarios/:id/preguntas', requireRole('docente', 'admin'), async (req, res) => {
   try {
     const { id } = req.params;
+
+    const cursoId = await getCuestionarioCursoId(id);
+    if (!cursoId) {
+      return res.status(404).json({ error: 'Cuestionario no encontrado' });
+    }
+
+    if (!(await canManageCurso(req, cursoId))) {
+      return res.status(403).json({ error: 'No puedes consultar las preguntas de este cuestionario' });
+    }
     
     const preguntas = await query(
       `SELECT p.*, 
@@ -1039,12 +1260,21 @@ app.get('/api/cuestionarios/:id/preguntas', async (req, res) => {
 });
 
 // POST /api/preguntas - Agregar pregunta a un quiz
-app.post('/api/preguntas', async (req, res) => {
+app.post('/api/preguntas', requireRole('docente', 'admin'), async (req, res) => {
   try {
     const { cuestionario_id, texto_pregunta, opciones } = req.body;
     
     if (!cuestionario_id || !texto_pregunta) {
       return res.status(400).json({ error: 'Quiz ID y texto de pregunta son requeridos' });
+    }
+
+    const cursoId = await getCuestionarioCursoId(cuestionario_id);
+    if (!cursoId) {
+      return res.status(404).json({ error: 'Cuestionario no encontrado' });
+    }
+
+    if (!(await canManageCurso(req, cursoId))) {
+      return res.status(403).json({ error: 'No puedes agregar preguntas a este cuestionario' });
     }
     
     // Insertar pregunta
@@ -1075,14 +1305,23 @@ app.post('/api/preguntas', async (req, res) => {
     
   } catch (error) {
     console.error('Error al agregar pregunta:', error);
-    res.status(500).json({ error: 'Error al agregar la pregunta: ' + error.message });
+    res.status(500).json({ error: 'Error al agregar la pregunta' });
   }
 });
 
 // DELETE /api/preguntas/:id - Eliminar pregunta
-app.delete('/api/preguntas/:id', async (req, res) => {
+app.delete('/api/preguntas/:id', requireRole('docente', 'admin'), async (req, res) => {
   try {
     const { id } = req.params;
+
+    const cursoId = await getPreguntaCursoId(id);
+    if (!cursoId) {
+      return res.status(404).json({ error: 'Pregunta no encontrada' });
+    }
+
+    if (!(await canManageCurso(req, cursoId))) {
+      return res.status(403).json({ error: 'No puedes eliminar esta pregunta' });
+    }
     
     // Eliminar opciones primero
     await query('DELETE FROM opcion WHERE pregunta_id = ?', [id]);
@@ -1107,7 +1346,7 @@ app.delete('/api/preguntas/:id', async (req, res) => {
 // ========================================
 
 // POST /api/upload - Subir archivo
-app.post('/api/upload', upload.single('file'), async (req, res) => {
+app.post('/api/upload', requireRole('docente', 'admin'), upload.single('file'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No se recibió ningún archivo' });
@@ -1132,7 +1371,7 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
 });
 
 // POST /api/upload-multiple - Subir múltiples archivos
-app.post('/api/upload-multiple', upload.array('files', 10), async (req, res) => {
+app.post('/api/upload-multiple', requireRole('docente', 'admin'), upload.array('files', 10), async (req, res) => {
   try {
     if (!req.files || req.files.length === 0) {
       return res.status(400).json({ error: 'No se recibieron archivos' });
@@ -1159,49 +1398,11 @@ app.post('/api/upload-multiple', upload.array('files', 10), async (req, res) => 
 });
 
 // ========================================
-// ENDPOINT DE PRUEBA
-// ========================================
-
-// GET /api/test-db - Probar conexión a base de datos
-app.get('/api/test-db', async (req, res) => {
-  try {
-    console.log('🔍 Probando conexión a base de datos...');
-    console.log('📊 Configuración DB:', {
-      host: dbConfig.host,
-      database: dbConfig.database,
-      port: dbConfig.port,
-      user: dbConfig.user,
-      hasPassword: !!dbConfig.password
-    });
-    
-    const result = await query('SELECT 1 AS test');
-    console.log('✅ Conexión exitosa');
-    res.json({ ok: true, message: 'Conexión exitosa', result });
-  } catch (error) {
-    console.error('❌ Error en test-db:', error.message);
-    console.error('Detalles:', {
-      code: error.code,
-      errno: error.errno,
-      sqlState: error.sqlState
-    });
-    res.status(500).json({ 
-      ok: false, 
-      error: error.message,
-      details: {
-        code: error.code,
-        errno: error.errno,
-        sqlState: error.sqlState
-      }
-    });
-  }
-});
-
-// ========================================
 // GESTIÓN DE USUARIOS (ADMIN)
 // ========================================
 
 // PUT /api/usuarios/:id - Actualizar usuario
-app.put('/api/usuarios/:id', async (req, res) => {
+app.put('/api/usuarios/:id', requireRole('admin'), async (req, res) => {
   try {
     const { id } = req.params;
     const { nombre, apellido, correo, estado } = req.body;
@@ -1242,12 +1443,12 @@ app.put('/api/usuarios/:id', async (req, res) => {
     
   } catch (error) {
     console.error('Error al actualizar usuario:', error);
-    res.status(500).json({ error: 'Error al actualizar usuario: ' + error.message });
+    res.status(500).json({ error: 'Error al actualizar usuario' });
   }
 });
 
 // PUT /api/usuarios/:id/estado - Cambiar estado del usuario
-app.put('/api/usuarios/:id/estado', async (req, res) => {
+app.put('/api/usuarios/:id/estado', requireRole('admin'), async (req, res) => {
   try {
     const { id } = req.params;
     const { estado } = req.body;
@@ -1269,12 +1470,12 @@ app.put('/api/usuarios/:id/estado', async (req, res) => {
     
   } catch (error) {
     console.error('Error al cambiar estado del usuario:', error);
-    res.status(500).json({ error: 'Error al cambiar estado: ' + error.message });
+    res.status(500).json({ error: 'Error al cambiar estado' });
   }
 });
 
 // GET /api/usuarios - Obtener todos los usuarios (admin)
-app.get('/api/usuarios', async (req, res) => {
+app.get('/api/usuarios', requireRole('admin'), async (req, res) => {
   try {
     const usuarios = await query(
       `SELECT u.id_usuario, u.nombre, u.apellido, u.correo, u.rol, u.estado,
@@ -1298,10 +1499,14 @@ app.get('/api/usuarios', async (req, res) => {
 // ========================================
 
 // PUT /api/docentes/:id - Actualizar docente
-app.put('/api/docentes/:id', async (req, res) => {
+app.put('/api/docentes/:id', requireRole('docente', 'admin'), async (req, res) => {
   try {
     const { id } = req.params;
     const { especialidad, experiencia } = req.body;
+
+    if (req.user.rol === 'docente' && String(req.user.id_docente) !== String(id)) {
+      return res.status(403).json({ error: 'Solo puedes editar tu propio perfil docente' });
+    }
     
     const result = await query(
       'UPDATE docente SET especialidad = ?, experiencia = ? WHERE id_docente = ?',
@@ -1316,7 +1521,7 @@ app.put('/api/docentes/:id', async (req, res) => {
     
   } catch (error) {
     console.error('Error al actualizar docente:', error);
-    res.status(500).json({ error: 'Error al actualizar docente: ' + error.message });
+    res.status(500).json({ error: 'Error al actualizar docente' });
   }
 });
 
@@ -1349,7 +1554,7 @@ app.get('/api/docentes/:id', async (req, res) => {
 // ========================================
 
 // POST /api/categorias - Crear categoría
-app.post('/api/categorias', async (req, res) => {
+app.post('/api/categorias', requireRole('admin'), async (req, res) => {
   try {
     const { nombre, descripcion } = req.body;
     
@@ -1370,12 +1575,12 @@ app.post('/api/categorias', async (req, res) => {
     
   } catch (error) {
     console.error('Error al crear categoría:', error);
-    res.status(500).json({ error: 'Error al crear categoría: ' + error.message });
+    res.status(500).json({ error: 'Error al crear categoría' });
   }
 });
 
 // PUT /api/categorias/:id - Actualizar categoría
-app.put('/api/categorias/:id', async (req, res) => {
+app.put('/api/categorias/:id', requireRole('admin'), async (req, res) => {
   try {
     const { id } = req.params;
     const { nombre, descripcion } = req.body;
@@ -1397,12 +1602,12 @@ app.put('/api/categorias/:id', async (req, res) => {
     
   } catch (error) {
     console.error('Error al actualizar categoría:', error);
-    res.status(500).json({ error: 'Error al actualizar categoría: ' + error.message });
+    res.status(500).json({ error: 'Error al actualizar categoría' });
   }
 });
 
 // DELETE /api/categorias/:id - Eliminar categoría
-app.delete('/api/categorias/:id', async (req, res) => {
+app.delete('/api/categorias/:id', requireRole('admin'), async (req, res) => {
   try {
     const { id } = req.params;
     
@@ -1424,7 +1629,7 @@ app.delete('/api/categorias/:id', async (req, res) => {
     
   } catch (error) {
     console.error('Error al eliminar categoría:', error);
-    res.status(500).json({ error: 'Error al eliminar categoría: ' + error.message });
+    res.status(500).json({ error: 'Error al eliminar categoría' });
   }
 });
 
@@ -1433,7 +1638,7 @@ app.delete('/api/categorias/:id', async (req, res) => {
 // ========================================
 
 // POST /api/grados - Crear grado
-app.post('/api/grados', async (req, res) => {
+app.post('/api/grados', requireRole('admin'), async (req, res) => {
   try {
     const { nombre, descripcion } = req.body;
     
@@ -1454,12 +1659,12 @@ app.post('/api/grados', async (req, res) => {
     
   } catch (error) {
     console.error('Error al crear grado:', error);
-    res.status(500).json({ error: 'Error al crear grado: ' + error.message });
+    res.status(500).json({ error: 'Error al crear grado' });
   }
 });
 
 // PUT /api/grados/:id - Actualizar grado
-app.put('/api/grados/:id', async (req, res) => {
+app.put('/api/grados/:id', requireRole('admin'), async (req, res) => {
   try {
     const { id } = req.params;
     const { nombre, descripcion } = req.body;
@@ -1481,12 +1686,12 @@ app.put('/api/grados/:id', async (req, res) => {
     
   } catch (error) {
     console.error('Error al actualizar grado:', error);
-    res.status(500).json({ error: 'Error al actualizar grado: ' + error.message });
+    res.status(500).json({ error: 'Error al actualizar grado' });
   }
 });
 
 // DELETE /api/grados/:id - Eliminar grado
-app.delete('/api/grados/:id', async (req, res) => {
+app.delete('/api/grados/:id', requireRole('admin'), async (req, res) => {
   try {
     const { id } = req.params;
     
@@ -1508,7 +1713,7 @@ app.delete('/api/grados/:id', async (req, res) => {
     
   } catch (error) {
     console.error('Error al eliminar grado:', error);
-    res.status(500).json({ error: 'Error al eliminar grado: ' + error.message });
+    res.status(500).json({ error: 'Error al eliminar grado' });
   }
 });
 
@@ -1517,16 +1722,24 @@ app.delete('/api/grados/:id', async (req, res) => {
 // ========================================
 
 // GET /api/recursos - Obtener todos los recursos
-app.get('/api/recursos', async (req, res) => {
+app.get('/api/recursos', requireRole('docente', 'admin'), async (req, res) => {
   try {
-    const recursos = await query(
-      `SELECT r.*, tr.nombre_tipo AS tipo,
+    let sql = `SELECT r.*, tr.nombre_tipo AS tipo,
               CONCAT(u.nombre, ' ', u.apellido) AS autor
        FROM recurso r
        LEFT JOIN tipo_recurso tr ON r.tipo_id = tr.id_tipo
-       LEFT JOIN usuario u ON r.usuario_id = u.id_usuario
-       ORDER BY r.fecha_subida DESC`
-    );
+       LEFT JOIN usuario u ON r.usuario_id = u.id_usuario`;
+    const params = [];
+
+    // Un docente solo ve sus propios recursos; el admin ve todos.
+    if (req.user.rol === 'docente') {
+      sql += ' WHERE r.usuario_id = ?';
+      params.push(req.user.id_usuario);
+    }
+
+    sql += ' ORDER BY r.fecha_subida DESC';
+
+    const recursos = await query(sql, params);
     
     res.json(recursos);
   } catch (error) {
@@ -1562,16 +1775,23 @@ app.get('/api/recursos/:id', async (req, res) => {
 });
 
 // PUT /api/recursos/:id - Actualizar recurso
-app.put('/api/recursos/:id', async (req, res) => {
+app.put('/api/recursos/:id', requireRole('docente', 'admin'), async (req, res) => {
   try {
     const { id } = req.params;
-    const { tipo_id, titulo, url, descripcion, estado } = req.body;
-    
+    const { tipo_id, titulo, url, descripcion } = req.body;
+
+    if (!(await canManageRecurso(req, id))) {
+      return res.status(403).json({ error: 'No puedes modificar este recurso' });
+    }
+
+    // Un docente no puede autoaprobar su recurso; el admin sí puede cambiar el estado.
+    const estado = isAdmin(req) ? (req.body.estado || 'pendiente') : 'pendiente';
+
     const result = await query(
       `UPDATE recurso 
        SET tipo_id = ?, titulo = ?, url = ?, descripcion = ?, estado = ?
        WHERE id_recurso = ?`,
-      [tipo_id || null, titulo || null, url || null, descripcion || null, estado || 'pendiente', id]
+      [tipo_id || null, titulo || null, url || null, descripcion || null, estado, id]
     );
     
     if (result.affectedRows === 0) {
@@ -1582,14 +1802,18 @@ app.put('/api/recursos/:id', async (req, res) => {
     
   } catch (error) {
     console.error('Error al actualizar recurso:', error);
-    res.status(500).json({ error: 'Error al actualizar recurso: ' + error.message });
+    res.status(500).json({ error: 'Error al actualizar recurso' });
   }
 });
 
 // DELETE /api/recursos/:id - Eliminar recurso
-app.delete('/api/recursos/:id', async (req, res) => {
+app.delete('/api/recursos/:id', requireRole('docente', 'admin'), async (req, res) => {
   try {
     const { id } = req.params;
+
+    if (!(await canManageRecurso(req, id))) {
+      return res.status(403).json({ error: 'No puedes eliminar este recurso' });
+    }
     
     const result = await query('DELETE FROM recurso WHERE id_recurso = ?', [id]);
     
@@ -1601,7 +1825,7 @@ app.delete('/api/recursos/:id', async (req, res) => {
     
   } catch (error) {
     console.error('Error al eliminar recurso:', error);
-    res.status(500).json({ error: 'Error al eliminar recurso: ' + error.message });
+    res.status(500).json({ error: 'Error al eliminar recurso' });
   }
 });
 
@@ -1610,7 +1834,7 @@ app.delete('/api/recursos/:id', async (req, res) => {
 // ========================================
 
 // GET /api/encuestas - Obtener todas las encuestas
-app.get('/api/encuestas', async (req, res) => {
+app.get('/api/encuestas', requireRole('docente', 'admin'), async (req, res) => {
   try {
     const { curso_id, alumno_id } = req.query;
     
@@ -1627,6 +1851,15 @@ app.get('/api/encuestas', async (req, res) => {
     `;
     
     const params = [];
+
+    // Un docente solo ve encuestas de sus propios cursos.
+    if (req.user.rol === 'docente') {
+      if (!req.user.id_docente) {
+        return res.status(403).json({ error: 'Perfil docente no encontrado' });
+      }
+      sql += ' AND c.docente_id = ?';
+      params.push(req.user.id_docente);
+    }
     
     if (curso_id) {
       sql += ' AND e.curso_id = ?';
@@ -1650,9 +1883,13 @@ app.get('/api/encuestas', async (req, res) => {
 });
 
 // GET /api/cursos/:id/encuestas - Obtener encuestas de un curso
-app.get('/api/cursos/:id/encuestas', async (req, res) => {
+app.get('/api/cursos/:id/encuestas', requireRole('docente', 'admin'), async (req, res) => {
   try {
     const { id } = req.params;
+
+    if (!(await canManageCurso(req, id))) {
+      return res.status(403).json({ error: 'No puedes consultar las encuestas de este curso' });
+    }
     
     const encuestas = await query(
       `SELECT e.*, 
@@ -1678,12 +1915,14 @@ app.get('/api/cursos/:id/encuestas', async (req, res) => {
 // ========================================
 
 // POST /api/aprobaciones - Crear registro de aprobación
-app.post('/api/aprobaciones', async (req, res) => {
+app.post('/api/aprobaciones', requireRole('admin'), async (req, res) => {
   try {
-    const { admin_id, objeto_tipo, objeto_id, estado, comentario } = req.body;
-    
-    if (!admin_id || !objeto_tipo || !objeto_id || !estado) {
-      return res.status(400).json({ error: 'Admin ID, tipo de objeto, ID de objeto y estado son requeridos' });
+    const { objeto_tipo, objeto_id, estado, comentario } = req.body;
+    // El admin se toma del token; no se confía en el ID enviado por el cliente.
+    const admin_id = req.user.id_usuario;
+
+    if (!objeto_tipo || !objeto_id || !estado) {
+      return res.status(400).json({ error: 'Tipo de objeto, ID de objeto y estado son requeridos' });
     }
     
     if (!['curso', 'contenido', 'recurso'].includes(objeto_tipo)) {
@@ -1739,12 +1978,12 @@ app.post('/api/aprobaciones', async (req, res) => {
     
   } catch (error) {
     console.error('Error al crear aprobación:', error);
-    res.status(500).json({ error: 'Error al procesar aprobación: ' + error.message });
+    res.status(500).json({ error: 'Error al procesar aprobación' });
   }
 });
 
 // GET /api/aprobaciones - Obtener todas las aprobaciones
-app.get('/api/aprobaciones', async (req, res) => {
+app.get('/api/aprobaciones', requireRole('admin'), async (req, res) => {
   try {
     const { objeto_tipo, estado } = req.query;
     
@@ -1788,7 +2027,7 @@ app.get('/api/aprobaciones', async (req, res) => {
 });
 
 // GET /api/aprobaciones/pendientes - Obtener objetos pendientes de aprobación
-app.get('/api/aprobaciones/pendientes', async (req, res) => {
+app.get('/api/aprobaciones/pendientes', requireRole('admin'), async (req, res) => {
   try {
     const { tipo } = req.query;
     
@@ -1853,7 +2092,7 @@ app.get('/api/aprobaciones/pendientes', async (req, res) => {
 });
 
 // PUT /api/aprobaciones/:id - Actualizar aprobación
-app.put('/api/aprobaciones/:id', async (req, res) => {
+app.put('/api/aprobaciones/:id', requireRole('admin'), async (req, res) => {
   try {
     const { id } = req.params;
     const { estado, comentario } = req.body;
@@ -1907,7 +2146,7 @@ app.put('/api/aprobaciones/:id', async (req, res) => {
     
   } catch (error) {
     console.error('Error al actualizar aprobación:', error);
-    res.status(500).json({ error: 'Error al actualizar aprobación: ' + error.message });
+    res.status(500).json({ error: 'Error al actualizar aprobación' });
   }
 });
 
@@ -1920,65 +2159,94 @@ app.put('/api/aprobaciones/:id', async (req, res) => {
 
 // Ruta principal y catch-all para SPA
 app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'index.html'));
+  res.sendFile(path.join(publicDir, 'index.html'));
 });
 
 // Error handler global (debe ir antes del catch-all)
 app.use((err, req, res, next) => {
-  console.error('Error no manejado:', err);
+  if (err instanceof multer.MulterError) {
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(400).json({ error: `El archivo supera el límite de ${MAX_UPLOAD_BYTES / (1024 * 1024)} MB` });
+    }
+    return res.status(400).json({ error: 'Archivo inválido' });
+  }
+
+  if (err && err.status === 400) {
+    return res.status(400).json({ error: err.message || 'Solicitud inválida' });
+  }
+
+  if (err && (err.status === 404 || err.statusCode === 404)) {
+    return res.status(404).send('Recurso no encontrado');
+  }
+
+  if (err && err.type === 'entity.parse.failed') {
+    return res.status(400).json({ error: 'JSON inválido' });
+  }
+
+  console.error('Error no manejado:', err && err.message);
   res.status(500).json({ error: 'Error interno del servidor' });
 });
 
 // Catch-all para rutas del SPA (debe ir al final, después de todas las rutas API)
-// Usar app.use() sin ruta para compatibilidad con Express 5.x
 app.use((req, res) => {
-  // Si no es una ruta de API y no es un archivo estático, servir index.html para el SPA
-  if (!req.path.startsWith('/api') && !req.path.startsWith('/uploads') && !req.path.match(/\.(js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot)$/)) {
-    res.sendFile(path.join(__dirname, 'index.html'));
-  } else if (req.path.startsWith('/api')) {
-    res.status(404).json({ error: 'Endpoint no encontrado' });
-  } else {
-    res.status(404).send('Recurso no encontrado');
+  if (req.path.startsWith('/api')) {
+    return res.status(404).json({ error: 'Endpoint no encontrado' });
   }
+
+  if (req.path.startsWith('/uploads')) {
+    return res.status(404).send('Recurso no encontrado');
+  }
+
+  // Nunca servir archivos ocultos ni archivos con extensión fuera de public/.
+  if (req.path.split('/').some((segment) => segment.startsWith('.'))) {
+    return res.status(404).send('Recurso no encontrado');
+  }
+
+  if (path.extname(req.path)) {
+    return res.status(404).send('Recurso no encontrado');
+  }
+
+  res.sendFile(path.join(publicDir, 'index.html'));
 });
 
 // ========================================
 // INICIO DEL SERVIDOR
 // ========================================
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 Servidor EduVision corriendo en puerto ${PORT}`);
-  console.log(`📊 Configuración de Base de Datos:`);
-  console.log(`   Host: ${dbConfig.host}`);
-  console.log(`   Database: ${dbConfig.database}`);
-  console.log(`   Port: ${dbConfig.port}`);
-  console.log(`   User: ${dbConfig.user}`);
-  console.log(`   Password: ${dbConfig.password ? '***configurada***' : '❌ NO CONFIGURADA'}`);
-  
-  // Validar que las variables estén configuradas
-  if (!process.env.MYSQLHOST || process.env.MYSQLHOST === 'localhost') {
-    console.warn('⚠️  ADVERTENCIA: MYSQLHOST no está configurado o está en localhost');
-    console.warn('⚠️  En Railway, asegúrate de configurar las variables de entorno:');
-    console.warn('⚠️  - MYSQLHOST');
-    console.warn('⚠️  - MYSQLUSER');
-    console.warn('⚠️  - MYSQLPASSWORD');
-    console.warn('⚠️  - MYSQLDATABASE');
-    console.warn('⚠️  - MYSQLPORT');
-  }
-  
-  if (dbConfig.host && dbConfig.host.includes('railway.internal')) {
-    console.error('❌ ERROR: Se está usando mysql.railway.internal');
-    console.error('❌ Esto solo funciona cuando MySQL está en el mismo proyecto');
-    console.error('❌ Como tienes proyectos separados, usa el MYSQLHOST real');
-    console.error('❌ Ejemplo: containers-us-east-XXX.railway.app');
-  }
-  
-  console.log(`📡 API disponible en http://0.0.0.0:${PORT}/api`);
-});
+if (require.main === module) {
+  const server = app.listen(PORT, '0.0.0.0', () => {
+    console.log(`🚀 Servidor EduVision corriendo en puerto ${PORT}`);
+    console.log(`📊 Base de datos configurada: ${dbConfig.database} (${dbConfig.host}:${dbConfig.port})`);
+    console.log(`📡 API disponible en http://0.0.0.0:${PORT}/api`);
 
-// Manejo de cierre graceful
-process.on('SIGINT', async () => {
-  console.log('\n👋 Cerrando servidor...');
-  await pool.end();
-  process.exit(0);
-});
+    if (!process.env.JWT_SECRET) {
+      console.warn('⚠️  JWT_SECRET no configurado. Configúralo para producción.');
+    }
+
+    if (!corsOrigins.length) {
+      console.warn('⚠️  CORS_ORIGINS vacío: solo se permiten peticiones del mismo origen.');
+    }
+
+    if (!process.env.MYSQLHOST || process.env.MYSQLHOST === 'localhost') {
+      console.warn('⚠️  MYSQLHOST no está configurado o está en localhost.');
+    }
+
+    if (dbConfig.host && dbConfig.host.includes('railway.internal')) {
+      console.error('❌ ERROR: Se está usando mysql.railway.internal');
+      console.error('❌ Usa el MYSQLHOST público del proyecto MySQL.');
+    }
+  });
+
+  const shutdown = async () => {
+    console.log('\n👋 Cerrando servidor...');
+    server.close(async () => {
+      await pool.end();
+      process.exit(0);
+    });
+  };
+
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+}
+
+module.exports = app;

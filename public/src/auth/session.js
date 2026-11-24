@@ -7,12 +7,22 @@ export class SessionManager {
   constructor() {
     this.loggedIn = false;
     this.user = null; // Objeto completo del usuario
+    this.token = null; // JWT emitido por el servidor
     
     // Cargar sesión desde localStorage
     this.loadSession();
     
     this.setupLoginButton();
     this.setupRegisterButton();
+    this.setupAuthEvents();
+  }
+
+  setupAuthEvents() {
+    window.addEventListener('eduvision:unauthorized', () => {
+      if (this.loggedIn) {
+        this.logout();
+      }
+    });
   }
 
   setupLoginButton() {
@@ -215,9 +225,10 @@ export class SessionManager {
       // Llamar a la API
       const response = await apiLogin(correo, contraseña);
       
-      if (response.success && response.user) {
+      if (response.success && response.user && response.token) {
         this.loggedIn = true;
         this.user = response.user;
+        this.token = response.token;
         
         // Guardar sesión en localStorage
         this.saveSession();
@@ -309,6 +320,7 @@ export class SessionManager {
   logout() {
     this.loggedIn = false;
     this.user = null;
+    this.token = null;
     
     // Limpiar localStorage
     localStorage.removeItem('eduVisionSession');
@@ -356,9 +368,10 @@ export class SessionManager {
   }
 
   saveSession() {
-    if (this.user) {
+    if (this.user && this.token) {
       localStorage.setItem('eduVisionSession', JSON.stringify({
         loggedIn: this.loggedIn,
+        token: this.token,
         user: this.user
       }));
     }
@@ -369,11 +382,15 @@ export class SessionManager {
       const sessionData = localStorage.getItem('eduVisionSession');
       if (sessionData) {
         const data = JSON.parse(sessionData);
-        if (data.loggedIn && data.user) {
+        if (data.loggedIn && data.user && data.token) {
           this.loggedIn = data.loggedIn;
           this.user = data.user;
+          this.token = data.token;
           this.updateNavbarButton();
           console.log('✓ Sesión restaurada:', this.user.correo);
+        } else if (data.loggedIn) {
+          // Sesión antigua sin token: forzar nuevo login.
+          localStorage.removeItem('eduVisionSession');
         }
       }
     } catch (error) {

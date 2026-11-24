@@ -7,9 +7,9 @@
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js",
-    "serve": "http-server -c-1 -p 8080",
-    "test": "echo \"Tests no implementados aún\" && exit 0",
-    "db:test": "node -e \"require('dotenv').config(); const mysql = require('mysql2/promise'); mysql.createConnection({host: process.env.MYSQLHOST, user: process.env.MYSQLUSER, password: process.env.MYSQLPASSWORD, database: process.env.MYSQLDATABASE, port: process.env.MYSQLPORT}).then(() => {console.log('✓ Conexión exitosa a la base de datos'); process.exit(0);}).catch(err => {console.error('✗ Error de conexión:', err.message); process.exit(1);})\""
+    "serve": "http-server -c-1 -p 8080 public",
+    "test": "node --test",
+    "db:hash-passwords": "node scripts/hash-passwords.js"
   },
   "keywords": [
     "educación",
@@ -21,12 +21,12 @@
   "author": "EduVision Team",
   "license": "MIT",
   "dependencies": {
-    "bcrypt": "^5.1.1",
+    "bcryptjs": "^3.0.3",
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
     "http-server": "^14.1.1",
     "jsonwebtoken": "^9.0.2",
-    "multer": "^1.4.5-lts.1",
+    "multer": "^2.0.2",
     "mysql2": "^3.15.3"
   },
   "devDependencies": {
@@ -38,6 +38,6 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/tu-usuario/eduvision.git"
+    "url": "https://github.com/tejedasebastian/Edu_Vision.git"
   }
 }

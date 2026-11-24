@@ -4,6 +4,21 @@
 const API_BASE_URL = window.location.origin + '/api';
 
 /**
+ * Lee el token JWT de la sesión guardada en localStorage.
+ * @returns {string|null}
+ */
+function getAuthToken() {
+  try {
+    const sessionData = localStorage.getItem('eduVisionSession');
+    if (!sessionData) return null;
+    const session = JSON.parse(sessionData);
+    return session && session.token ? session.token : null;
+  } catch (error) {
+    return null;
+  }
+}
+
+/**
  * Realiza una petición HTTP al servidor
  * @param {string} endpoint - Endpoint de la API
  * @param {object} options - Opciones de fetch
@@ -11,12 +26,14 @@ const API_BASE_URL = window.location.origin + '/api';
  */
 async function apiRequest(endpoint, options = {}) {
   try {
+    const token = getAuthToken();
     const config = {
+      ...options,
       headers: {
         'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
         ...options.headers
-      },
-      ...options
+      }
     };
 
     const response = await fetch(`${API_BASE_URL}${endpoint}`, config);
@@ -28,6 +45,12 @@ async function apiRequest(endpoint, options = {}) {
     } catch (parseError) {
       const text = await response.text();
       throw new Error(text || `Error ${response.status}: ${response.statusText}`);
+    }
+
+    if (response.status === 401 && !endpoint.startsWith('/login')) {
+      // Token inválido/expirado: limpiar sesión local y avisar a la app.
+      localStorage.removeItem('eduVisionSession');
+      window.dispatchEvent(new CustomEvent('eduvision:unauthorized'));
     }
 
     if (!response.ok) {
@@ -190,11 +213,11 @@ export async function getDocenteEstadisticas(docenteId) {
 }
 
 // ========================================
-// PRUEBAS
+// SALUD DEL SERVICIO
 // ========================================
 
-export async function testDatabase() {
-  return apiRequest('/test-db');
+export async function getHealth() {
+  return apiRequest('/health');
 }
 
 // Exportar objeto API completo
@@ -451,8 +474,8 @@ export const API = {
     });
   },
   
-  // Test
-  testDatabase
+  // Salud del servicio
+  getHealth
 };
 
 export default API;

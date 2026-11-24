@@ -4,8 +4,8 @@ package-lock.json
 
 # Variables de entorno
 .env
-.env.local
-.env.production
+.env.*
+!.env.example
 
 # Archivos de sistema
 .DS_Store

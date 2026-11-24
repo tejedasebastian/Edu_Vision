@@ -14,7 +14,7 @@ import { ThemeManager } from './theme/theme-manager.js';
 import { ColorBlindnessFilters } from './accessibility/color-blindness.js';
 import { CoursesController } from './courses/courses-controller.js';
 import { TeacherController } from './teacher/teacher-controller.js';
-import { testDatabase } from './api/api.js';
+import { getHealth } from './api/api.js';
 
 class App {
   constructor() {
@@ -37,20 +37,16 @@ class App {
     try {
       console.log('🚀 Iniciando EduVision...');
       
-      // Probar conexión con la base de datos
+      // Comprobar que el servidor esté disponible (endpoint público /health)
       try {
-        const dbTest = await testDatabase();
-        if (dbTest && dbTest.ok) {
-          console.log('✓ Conexión con base de datos exitosa');
+        const health = await getHealth();
+        if (health && health.status === 'ok') {
+          console.log('✓ Servidor disponible');
         } else {
-          console.warn('⚠️ La base de datos respondió pero con advertencias');
+          console.warn('⚠️ El servidor respondió con un estado inesperado');
         }
       } catch (error) {
-        console.warn('⚠️ No se pudo conectar con la base de datos. Algunas funciones pueden no estar disponibles.');
-        console.warn('💡 Verifica que las variables de entorno estén configuradas en Railway.');
-        if (error.details) {
-          console.warn('Detalles del error:', error.details);
-        }
+        console.warn('⚠️ No se pudo contactar con el servidor. Algunas funciones pueden no estar disponibles.');
       }
       
       // Inicializar módulos principales

@@ -142,30 +142,30 @@ CREATE TABLE aprobacion_admin (
   FOREIGN KEY (admin_id) REFERENCES usuario(id_usuario)
 );
 INSERT INTO usuario (nombre, apellido, correo, contraseña, rol, estado) VALUES
-('Carlos', 'Mendoza', 'carlos.mendoza@admin.edu', 'admin123', 'admin', 'activo'),
-('María', 'Torres', 'maria.torres@admin.edu', 'admin456', 'admin', 'activo'),
-('Ana', 'Rodríguez', 'ana.rodriguez@docente.edu', 'doc123', 'docente', 'activo'),
-('Pedro', 'García', 'pedro.garcia@docente.edu', 'doc456', 'docente', 'activo'),
-('Laura', 'Martínez', 'laura.martinez@docente.edu', 'doc789', 'docente', 'activo'),
-('Roberto', 'Sánchez', 'roberto.sanchez@docente.edu', 'doc012', 'docente', 'activo'),
-('Carmen', 'López', 'carmen.lopez@docente.edu', 'doc345', 'docente', 'activo'),
-('Miguel', 'Fernández', 'miguel.fernandez@docente.edu', 'doc678', 'docente', 'activo'),
-('Ricardo', 'Vega', 'ricardo.vega@docente.edu', 'doc901', 'docente', 'activo'),
-('Elena', 'Campos', 'elena.campos@docente.edu', 'doc234', 'docente', 'activo'),
-('Juan', 'Pérez', 'juan.perez@alumno.edu', 'alum123', 'alumno', 'activo'),
-('Sofía', 'González', 'sofia.gonzalez@alumno.edu', 'alum456', 'alumno', 'activo'),
-('Diego', 'Ramírez', 'diego.ramirez@alumno.edu', 'alum789', 'alumno', 'activo'),
-('Valentina', 'Castro', 'valentina.castro@alumno.edu', 'alum012', 'alumno', 'activo'),
-('Mateo', 'Flores', 'mateo.flores@alumno.edu', 'alum345', 'alumno', 'activo'),
-('Isabella', 'Morales', 'isabella.morales@alumno.edu', 'alum678', 'alumno', 'activo'),
-('Lucas', 'Herrera', 'lucas.herrera@alumno.edu', 'alum901', 'alumno', 'activo'),
-('Camila', 'Vargas', 'camila.vargas@alumno.edu', 'alum234', 'alumno', 'activo'),
-('Sebastián', 'Rojas', 'sebastian.rojas@alumno.edu', 'alum567', 'alumno', 'activo'),
-('Martina', 'Silva', 'martina.silva@alumno.edu', 'alum890', 'alumno', 'activo'),
-('Andrés', 'Mendez', 'andres.mendez@alumno.edu', 'alum111', 'alumno', 'activo'),
-('Valeria', 'Ortiz', 'valeria.ortiz@alumno.edu', 'alum222', 'alumno', 'activo'),
-('Gabriel', 'Reyes', 'gabriel.reyes@alumno.edu', 'alum333', 'alumno', 'activo'),
-('Lucía', 'Paredes', 'lucia.paredes@alumno.edu', 'alum444', 'alumno', 'activo');
+('Carlos', 'Mendoza', 'carlos.mendoza@admin.edu', '$2a$10$LxrNJVZhdKucC7Ms0h2T.OKeMc/luyiLxufAfiYxTEDjR0rGwwXqu', 'admin', 'activo'),
+('María', 'Torres', 'maria.torres@admin.edu', '$2a$10$eN2Y1hZn2JT0mn5jxd0jguM7IzUCUvPxXoA29fOJ1onsc3QmKCosy', 'admin', 'activo'),
+('Ana', 'Rodríguez', 'ana.rodriguez@docente.edu', '$2a$10$JfA8lGv35HSrmhKeYxqT0.beyJrFQwBjVO6T7NBAdxBNSQemadX3m', 'docente', 'activo'),
+('Pedro', 'García', 'pedro.garcia@docente.edu', '$2a$10$9rFELEqUDB2SQpKk1e3kFeDIQrJVLMnLmn7rMrLiaRMA0M7YxggFK', 'docente', 'activo'),
+('Laura', 'Martínez', 'laura.martinez@docente.edu', '$2a$10$DSN19VDB.WPpTjWsqJTyleW0kwdtfAt.d92hrOJHwtlny1elvDTUu', 'docente', 'activo'),
+('Roberto', 'Sánchez', 'roberto.sanchez@docente.edu', '$2a$10$vTh.H0lJWqRA8aqm19SHAuIWTb0MnWmmGCS/Kc2mCYB3qCnqHJMtm', 'docente', 'activo'),
+('Carmen', 'López', 'carmen.lopez@docente.edu', '$2a$10$evOO0l7F8JPpWs5z19h2a.dsvTQivNm78HeJisJFhuxzQkV2oIZBa', 'docente', 'activo'),
+('Miguel', 'Fernández', 'miguel.fernandez@docente.edu', '$2a$10$KGvqQiYcQfvrfkuqGHT.cO/CFUTvzuigwDsVEr6gvgQ331Y08MNvm', 'docente', 'activo'),
+('Ricardo', 'Vega', 'ricardo.vega@docente.edu', '$2a$10$ElC7xajAQvlkcUKhjepFceUnmspjDMxb1h4dDNjLSUDdoE7PE5lju', 'docente', 'activo'),
+('Elena', 'Campos', 'elena.campos@docente.edu', '$2a$10$9DgdEf9uCNBkY6i2KCFcVOLv7l/edRp9AQJnE08ZBihRs8yQwGaHu', 'docente', 'activo'),
+('Juan', 'Pérez', 'juan.perez@alumno.edu', '$2a$10$e1eHwQeKAuViDWTuLliuqONx5anQ0cU9hO147aydyP01bh6RAFPIG', 'alumno', 'activo'),
+('Sofía', 'González', 'sofia.gonzalez@alumno.edu', '$2a$10$ryLCggQz2UecH85L.Lc14uz9pRdMdcFJcJPZxZJAXcYQkvbivFgaG', 'alumno', 'activo'),
+('Diego', 'Ramírez', 'diego.ramirez@alumno.edu', '$2a$10$kkkXA7yQPLOfwJM/oSWlyOb2FyV9LwO3HMTDGnueiHhJr7XSfqEtm', 'alumno', 'activo'),
+('Valentina', 'Castro', 'valentina.castro@alumno.edu', '$2a$10$atf8UG3NzeA46F2PmrduOO1MzeT3T.Itazp1neAEQwSEifwT0QwkW', 'alumno', 'activo'),
+('Mateo', 'Flores', 'mateo.flores@alumno.edu', '$2a$10$BsmvsIcs8qtYRvNi1Gqkbu6q.8XLi4DcX1uPEqydAqazrxWG0ZBWS', 'alumno', 'activo'),
+('Isabella', 'Morales', 'isabella.morales@alumno.edu', '$2a$10$UgQTwMjdXEFAY.ZwpRxwX.fHp1RzYcdIFUvRY7qTDpnMiDzUaTlte', 'alumno', 'activo'),
+('Lucas', 'Herrera', 'lucas.herrera@alumno.edu', '$2a$10$vTnyHbdb0OFuS/V.0re2/OUvnZW9GGmVNLI0TDXJUg76r4zE6BYTG', 'alumno', 'activo'),
+('Camila', 'Vargas', 'camila.vargas@alumno.edu', '$2a$10$RSqM9whEUdRKAaaXSPDGheSQXaoxYYxlUNzUPOFRMPXsRoz4h1tbW', 'alumno', 'activo'),
+('Sebastián', 'Rojas', 'sebastian.rojas@alumno.edu', '$2a$10$6TTKqKiAg.SH.TQPH1Rexeiy91OtWz8Sa1Cjyc4BiYkKyEVlTSKWi', 'alumno', 'activo'),
+('Martina', 'Silva', 'martina.silva@alumno.edu', '$2a$10$Kn3.VoHCszWnEG6qtRTuzetu1NZyVMwfa16aYbblS8AGpc6QKw4Iy', 'alumno', 'activo'),
+('Andrés', 'Mendez', 'andres.mendez@alumno.edu', '$2a$10$QiEu598Xxdk.S41ZIpTUH.C01uev9XtjRCcADHWL/knP7R2k3gDfW', 'alumno', 'activo'),
+('Valeria', 'Ortiz', 'valeria.ortiz@alumno.edu', '$2a$10$fEGEfduRohUWru2Qh3/tNOND59R9PutCjhewqKIVJ7xS1WqQ1rDQK', 'alumno', 'activo'),
+('Gabriel', 'Reyes', 'gabriel.reyes@alumno.edu', '$2a$10$WdKj8zgk/X/97qqmCKguq.bKHD5pqcLFlVjP6HiKgt2N/uTTfZYtS', 'alumno', 'activo'),
+('Lucía', 'Paredes', 'lucia.paredes@alumno.edu', '$2a$10$ZP3ftgIvRGnfdQ053ZnU.OFk9I43EjlB2rlYP6ZsBvtdCu9n0sRuq', 'alumno', 'activo');
 
 INSERT INTO docente (usuario_id, especialidad, experiencia) VALUES
 (3, 'Aritmética', '8 años enseñando matemáticas básicas y operaciones numéricas'),
@@ -698,18 +698,14 @@ GRANT SELECT ON sistema_cursos.opcion TO rol_alumno;
 
 
 -- ======================================
--- CREACIÓN DE USUARIOS Y ASIGNACIÓN DE ROLES
+-- CREACIÓN DE USUARIOS DE MySQL (MANUAL)
 -- ======================================
 
-CREATE USER IF NOT EXISTS 'admin'@'localhost' IDENTIFIED BY 'admin123';
-CREATE USER IF NOT EXISTS 'docente1'@'localhost' IDENTIFIED BY 'doc123';
-CREATE USER IF NOT EXISTS 'alumno1'@'localhost' IDENTIFIED BY 'alu123';
-
--- Asignar roles a usuarios
-GRANT rol_admin TO 'admin'@'localhost';
-GRANT rol_docente TO 'docente1'@'localhost';
-GRANT rol_alumno TO 'alumno1'@'localhost';
-FLUSH PRIVILEGES;
+-- Por seguridad, este script NO crea cuentas de MySQL con contraseñas de ejemplo.
+-- Crea una cuenta con contraseña fuerte y asígnale el rol que corresponda, por ejemplo:
+--   CREATE USER 'app_eduvision'@'%' IDENTIFIED BY '<contraseña-fuerte>';
+--   GRANT rol_admin TO 'app_eduvision'@'%';
+--   FLUSH PRIVILEGES;
 
 -- 1. Vista general de los usuarios (admin, docente, alumno)
 CREATE OR REPLACE VIEW vista_usuarios_resumen AS
